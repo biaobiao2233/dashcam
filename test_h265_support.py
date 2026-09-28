@@ -14,14 +14,15 @@ def box(name: bytes, payload: bytes) -> bytes:
     return struct.pack(">I4s", len(payload) + 8, name) + payload
 
 
-def synthetic_mp4(sample_type: bytes, config_type: bytes, config_payload: bytes) -> bytes:
+def synthetic_mp4(sample_type: bytes, config_type: bytes, config_payload: bytes,
+                  mdat_payload: bytes = b"") -> bytes:
     sample = box(sample_type, bytes(78) + box(config_type, config_payload))
     stsd = box(b"stsd", bytes(4) + struct.pack(">I", 1) + sample)
     stbl = box(b"stbl", stsd)
     minf = box(b"minf", stbl)
     mdia = box(b"mdia", minf)
     trak = box(b"trak", mdia)
-    return box(b"moov", trak) + box(b"mdat", b"")
+    return box(b"moov", trak) + box(b"mdat", mdat_payload)
 
 
 class H265SupportTests(unittest.TestCase):
@@ -62,6 +63,36 @@ class H265SupportTests(unittest.TestCase):
         h265 = bytes([39 << 1, 0x01, 0x05, 0x04, 0x42, 0x42, 0x69, 0x30, 0x40, 0x80])
         self.assertEqual(sei_extractor.extract_proto_payload(h264, "h264"), b"\x10\x20")
         self.assertEqual(sei_extractor.extract_proto_payload(h265, "h265"), b"\x30\x40")
+
+    def test_h265_mp4_config_to_decoded_message(self):
+        hvcc = bytearray(22)
+        hvcc[21] = 0xFD  # two-byte NAL lengths
+        h265_sei = bytes([39 << 1, 0x01, 0x05, 0x05, 0x42, 0x42, 0x69, 0x30, 0x40, 0x80])
+        mdat = len(h265_sei).to_bytes(2, "big") + h265_sei
+        fp = io.BytesIO(synthetic_mp4(b"hvc1", b"hvcC", bytes(hvcc), mdat))
+
+        codec, nal_length_size = sei_extractor.find_video_config(fp)
+        offset, size = sei_extractor.find_mdat(fp)
+
+        class FakeMetadata:
+            def ParseFromString(self, payload):
+                self.payload = payload
+
+        original = getattr(sei_extractor.dashcam_pb2, "SeiMetadata", None)
+        sei_extractor.dashcam_pb2.SeiMetadata = FakeMetadata
+        try:
+            messages = list(sei_extractor.iter_sei_messages(
+                fp, offset, size, codec, nal_length_size))
+        finally:
+            if original is None:
+                delattr(sei_extractor.dashcam_pb2, "SeiMetadata")
+            else:
+                sei_extractor.dashcam_pb2.SeiMetadata = original
+
+        self.assertEqual(codec, "h265")
+        self.assertEqual(nal_length_size, 2)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].payload, b"\x30\x40")
 
 
 if __name__ == "__main__":

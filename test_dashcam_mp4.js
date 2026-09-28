@@ -49,7 +49,7 @@ function mp4Box(type, payload) {
     return out;
 }
 
-function h265ConfigMp4() {
+function h265ConfigMp4(mdatPayload = Buffer.alloc(0)) {
     const hvcc = Buffer.alloc(23);
     hvcc[0] = 1;
     hvcc[1] = 1; // Main profile
@@ -82,7 +82,7 @@ function h265ConfigMp4() {
     const minf = mp4Box('minf', stbl);
     const mdia = mp4Box('mdia', Buffer.concat([mdhd, minf]));
     const trak = mp4Box('trak', mdia);
-    return mp4Box('moov', trak);
+    return Buffer.concat([mp4Box('moov', trak), mp4Box('mdat', mdatPayload)]);
 }
 
 {
@@ -94,6 +94,16 @@ function h265ConfigMp4() {
     assert.equal(config.width, 1920);
     assert.equal(config.height, 1080);
     assert.equal(config.codec, 'hvc1.1.6.L93.B0');
+}
+
+{
+    const h265Sei = Buffer.from([39 << 1, 0x01, 0x05, 0x05, 0x42, 0x42, 0x69, 0x30, 0x40, 0x80]);
+    const length = Buffer.alloc(2);
+    length.writeUInt16BE(h265Sei.length);
+    const file = h265ConfigMp4(Buffer.concat([length, h265Sei]));
+    const p = parser(new Uint8Array(file));
+    const fakeProto = { decode: bytes => Array.from(bytes) };
+    assert.deepEqual(p.extractSeiMessages(fakeProto), [[0x30, 0x40]]);
 }
 
 console.log('dashcam-mp4 H.265 synthetic tests passed');
