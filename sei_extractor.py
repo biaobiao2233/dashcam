@@ -64,16 +64,53 @@ def iter_sei_messages(fp, offset: int, size: int):
         yield meta
 
 
-def extract_proto_payload(nal: bytes) -> Optional[bytes]:
-    """Extract protobuf payload from SEI NAL unit."""
-    if not isinstance(nal, bytes) or len(nal) < 2:
+def sei_payload_offset(nal: bytes) -> Optional[int]:
+    """Return the first byte after the SEI payload type/size header."""
+    if len(nal) < 3:
         return None
-    for i in range(3, len(nal) - 1):
+
+    # H.264: one-byte NAL header, type 6 = SEI.
+    if (nal[0] & 0x1F) == 6:
+        payload_type_offset = 1
+    # H.265/HEVC: two-byte NAL header, types 39/40 = prefix/suffix SEI.
+    elif ((nal[0] >> 1) & 0x3F) in (39, 40):
+        payload_type_offset = 2
+    else:
+        return None
+
+    i = payload_type_offset
+    payload_type = 0
+    while i < len(nal) and nal[i] == 0xFF:
+        payload_type += 0xFF
+        i += 1
+    if i >= len(nal):
+        return None
+    payload_type += nal[i]
+    i += 1
+    if payload_type != 5:  # user_data_unregistered
+        return None
+
+    # Skip payload_size. The Tesla protobuf framing starts inside the payload.
+    while i < len(nal) and nal[i] == 0xFF:
+        i += 1
+    if i >= len(nal):
+        return None
+    return i + 1
+
+
+def extract_proto_payload(nal: bytes) -> Optional[bytes]:
+    """Extract protobuf payload from an H.264 or H.265 SEI NAL unit."""
+    if not isinstance(nal, bytes):
+        return None
+    start = sei_payload_offset(nal)
+    if start is None:
+        return None
+    for i in range(start, len(nal) - 1):
         byte = nal[i]
         if byte == 0x42:
             continue
         if byte == 0x69:
-            if i > 2:
+            if i > start:
                 return strip_emulation_prevention_bytes(nal[i + 1:-1])
             break
         break
@@ -94,10 +131,7 @@ def strip_emulation_prevention_bytes(data: bytes) -> bytes:
 
 
 def iter_nals(fp, offset: int, size: int) -> Generator[bytes, None, None]:
-    """Yield SEI user NAL units from the MP4 mdat atom."""
-    NAL_ID_SEI = 6
-    NAL_SEI_ID_USER_DATA_UNREGISTERED = 5
-
+    """Yield H.264/H.265 SEI user-data NAL units from the MP4 mdat atom."""
     fp.seek(offset)
     consumed = 0
     while size == 0 or consumed < size:
@@ -110,21 +144,13 @@ def iter_nals(fp, offset: int, size: int) -> Generator[bytes, None, None]:
             consumed += 4 + nal_size
             continue
 
-        first_two = fp.read(2)
-        if len(first_two) != 2:
+        nal = fp.read(nal_size)
+        if len(nal) != nal_size:
             break
-
-        if (first_two[0] & 0x1F) != NAL_ID_SEI or first_two[1] != NAL_SEI_ID_USER_DATA_UNREGISTERED:
-            fp.seek(nal_size - 2, 1)
-            consumed += 4 + nal_size
-            continue  # skip non-SEI NALs
-
-        rest = fp.read(nal_size - 2)
-        if len(rest) != nal_size - 2:
-            break
-        payload = first_two + rest
         consumed += 4 + nal_size
-        yield payload
+
+        if sei_payload_offset(nal) is not None:
+            yield nal
 
 
 def find_mdat(fp) -> Tuple[int, int]:
