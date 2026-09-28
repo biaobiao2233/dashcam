@@ -614,9 +614,20 @@
         function createChunk(frame) {
             const sc = new Uint8Array([0, 0, 0, 1]);
             const config = mp4.getConfig();
-            const data = frame.keyframe
-                ? DashcamMP4.concat(sc, frame.sps || config.sps, sc, frame.pps || config.pps, sc, frame.data)
-                : DashcamMP4.concat(sc, frame.data);
+            let data;
+            if (frame.keyframe) {
+                const parts = [];
+                const parameterSets = config.codecFamily === 'hevc'
+                    ? [frame.vps || config.vps, frame.sps || config.sps, frame.pps || config.pps]
+                    : [frame.sps || config.sps, frame.pps || config.pps];
+                for (const parameterSet of parameterSets) {
+                    if (parameterSet) parts.push(sc, parameterSet);
+                }
+                parts.push(sc, frame.data);
+                data = DashcamMP4.concat(...parts);
+            } else {
+                data = DashcamMP4.concat(sc, frame.data);
+            }
             return new EncodedVideoChunk({ type: frame.keyframe ? 'key' : 'delta', timestamp: frame.index * 33333, data });
         }
 
