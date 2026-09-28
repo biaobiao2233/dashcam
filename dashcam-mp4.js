@@ -148,10 +148,8 @@ class DashcamMP4 {
         const levelIdc = this.view.getUint8(offset + 12);
         const constraints = [];
         for (let i = 0; i < 6; i++) constraints.push(this.view.getUint8(offset + 6 + i));
-        while (constraints.length && constraints[constraints.length - 1] === 0) constraints.pop();
-        const constraintSuffix = constraints.length
-            ? '.' + constraints.map(b => this.hex(b).toUpperCase()).join('')
-            : '';
+        while (constraints.length > 1 && constraints[constraints.length - 1] === 0) constraints.pop();
+        const constraintSuffix = '.' + constraints.map(b => this.hex(b).toUpperCase()).join('.');
         return `${sampleType}.${profileSpace}${profileIdc}.${compatibility}.${tier}${levelIdc}${constraintSuffix}`;
     }
 
@@ -172,6 +170,11 @@ class DashcamMP4 {
 
     nalType(firstByte, codecFamily) {
         return codecFamily === 'hevc' ? (firstByte >> 1) & 0x3F : firstByte & 0x1F;
+    }
+
+    /** HEVC VCL NALs start each picture with first_slice_segment_in_pic_flag = 1. */
+    hevcFirstSliceSegment(nal) {
+        return nal.length >= 3 && (nal[2] & 0x80) !== 0;
     }
 
     // -------------------------------------------------------------
@@ -207,6 +210,7 @@ class DashcamMP4 {
                         data,
                         sei: pendingSei,
                         vps: null,
+                        nalUnits: [data],
                         sps: currentSps,
                         pps: currentPps
                     });
@@ -221,16 +225,23 @@ class DashcamMP4 {
                     const sei = this.decodeSei(data, SeiMetadata, 'hevc');
                     if (sei && frames.length) frames[frames.length - 1].sei = sei;
                 } else if (type <= 31) {
-                    frames.push({
-                        index: frames.length,
-                        keyframe: type >= 16 && type <= 21,
-                        data,
-                        sei: pendingSei,
-                        vps: currentVps,
-                        sps: currentSps,
-                        pps: currentPps
-                    });
-                    pendingSei = null;
+                    const firstSlice = this.hevcFirstSliceSegment(data);
+                    const previous = frames[frames.length - 1];
+                    if (!firstSlice && previous) {
+                        previous.nalUnits.push(data);
+                    } else {
+                        frames.push({
+                            index: frames.length,
+                            keyframe: type >= 16 && type <= 21,
+                            data,
+                            nalUnits: [data],
+                            sei: pendingSei,
+                            vps: currentVps,
+                            sps: currentSps,
+                            pps: currentPps
+                        });
+                        pendingSei = null;
+                    }
                 }
             }
             cursor += len;

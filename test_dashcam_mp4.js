@@ -40,6 +40,21 @@ function parser(bytes = new Uint8Array(64)) {
     assert.equal(p.hevcCodecString('hvc1', 0), 'hvc1.1.6.L93.B0');
 }
 
+{
+    const bytes = new Uint8Array(32);
+    const view = new DataView(bytes.buffer);
+    view.setUint8(1, 0x01);
+    view.setUint32(2, 0x60000000);
+    view.setUint8(12, 93);
+    const p = parser(bytes);
+    assert.equal(p.hevcCodecString('hvc1', 0), 'hvc1.1.6.L93.00');
+
+    view.setUint8(6, 0xB0);
+    view.setUint8(7, 0x01);
+    const pWithConstraints = parser(bytes);
+    assert.equal(pWithConstraints.hevcCodecString('hvc1', 0), 'hvc1.1.6.L93.B0.01');
+}
+
 
 function mp4Box(type, payload) {
     const out = Buffer.alloc(8 + payload.length);
@@ -104,6 +119,28 @@ function h265ConfigMp4(mdatPayload = Buffer.alloc(0)) {
     const p = parser(new Uint8Array(file));
     const fakeProto = { decode: bytes => Array.from(bytes) };
     assert.deepEqual(p.extractSeiMessages(fakeProto), [[0x30, 0x40]]);
+}
+
+{
+    const nal = (...bytes) => Buffer.from(bytes);
+    const lengthPrefixed = (...nals) => Buffer.concat(nals.flatMap(n => {
+        const length = Buffer.alloc(2);
+        length.writeUInt16BE(n.length);
+        return [length, n];
+    }));
+    const keyFirst = nal(19 << 1, 0x01, 0x80, 0x11);
+    const keyContinuation = nal(19 << 1, 0x01, 0x00, 0x22);
+    const deltaFirst = nal(1 << 1, 0x01, 0x80, 0x33);
+    const deltaContinuation = nal(1 << 1, 0x01, 0x00, 0x44);
+    const file = h265ConfigMp4(lengthPrefixed(
+        keyFirst, keyContinuation, deltaFirst, deltaContinuation));
+    const p = parser(new Uint8Array(file));
+    const frames = p.parseFrames({ decode: () => null });
+    assert.equal(frames.length, 2);
+    assert.equal(frames[0].keyframe, true);
+    assert.equal(frames[1].keyframe, false);
+    assert.equal(frames[0].nalUnits.length, 2);
+    assert.equal(frames[1].nalUnits.length, 2);
 }
 
 console.log('dashcam-mp4 H.265 synthetic tests passed');
